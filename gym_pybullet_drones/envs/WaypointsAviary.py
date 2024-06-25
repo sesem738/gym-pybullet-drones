@@ -5,7 +5,7 @@ from gym_pybullet_drones.envs.BaseRLAviary import BaseRLAviary
 from gym_pybullet_drones.utils.trajectory_generator import Waypoints_Generator
 from gym_pybullet_drones.utils.enums import DroneModel, Physics, ActionType, ObservationType
 
-class Waypoints(BaseRLAviary):
+class WaypointsAviary(BaseRLAviary):
     """Single Agent RL Agent: Track Waypoints"""
     
     def __init__(self,
@@ -53,7 +53,6 @@ class Waypoints(BaseRLAviary):
             self.wp_cnt = 0
             self.EPISODE_LEN_SEC = 8
 
-
             super().__init__(drone_model=drone_model,
                          num_drones=1,
                          initial_xyzs=initial_xyzs,
@@ -86,8 +85,9 @@ class Waypoints(BaseRLAviary):
 
         lo = -np.inf
         hi = np.inf
-        obs_lower_bound = np.array([lo,lo,0,lo,lo,lo,lo,lo,lo,lo,lo,lo,lo,lo,0,lo,lo,0,lo,lo,0])
-        obs_upper_bound = np.array([hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi])
+
+        obs_lower_bound = np.array([[lo,lo,0,lo,lo,lo,lo,lo,lo,lo,lo,lo,lo,lo,0,lo,lo,0,lo,lo,0] for i in range(self.NUM_DRONES)])
+        obs_upper_bound = np.array([[hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi,hi] for i in range(self.NUM_DRONES)])
 
         #### Add action buffer to observation space ################
         act_lo = -1
@@ -118,11 +118,24 @@ class Waypoints(BaseRLAviary):
         """
             
         #### OBS SPACE OF SIZE 21
-        obs_21 = np.zeros((self.NUM_DRONES,21))
+        
+        obs_21 = np.zeros((self.NUM_DRONES, 21))
         for i in range(self.NUM_DRONES):
             obs = self._getDroneStateVector(i)
-            obs_21[i, :] = np.hstack([obs[0:3], obs[7:10], obs[10:13], obs[13:16], self.waypoints[self.wp_cnt], self.waypoints[self.wp_cnt + 1], self.waypoints[self.wp_cnt + 2]]).reshape(21,) 
+            
+            # Ensure indices stay within the bounds of self.waypoints
+            wp_cnt_plus_1 = min(self.wp_cnt + 1, len(self.waypoints) - 1)
+            wp_cnt_plus_2 = min(self.wp_cnt + 2, len(self.waypoints) - 1)
+
+            obs_21[i, :] = np.hstack([
+                obs[0:3], obs[7:10], obs[10:13], obs[13:16], 
+                self.waypoints[self.wp_cnt], 
+                self.waypoints[wp_cnt_plus_1], 
+                self.waypoints[wp_cnt_plus_2]
+            ]).reshape(21,) 
+        
         ret = np.array([obs_21[i, :] for i in range(self.NUM_DRONES)]).astype('float32')
+        
         #### Add action buffer to observation #######################
         for i in range(self.ACTION_BUFFER_SIZE):
             ret = np.hstack([ret, np.array([self.action_buffer[i][j, :] for j in range(self.NUM_DRONES)])])
@@ -140,8 +153,27 @@ class Waypoints(BaseRLAviary):
 
         """
         state = self._getDroneStateVector(0)
-        ret = max(0, 2 - np.linalg.norm(self.TARGET_POS-state[0:3])**4)
-        return ret
+
+        dist = -np.linalg.norm(self.waypoints[self.wp_cnt] - state[0:3])
+
+        # Reward for reaching the waypoint (larger reward)
+        if dist < 0.01 and self.wp_cnt < len(self.waypoints) - 1:  # Define a threshold for 'reaching' the waypoint
+            reach = 10
+            self.wp_cnt += 1
+        else:
+            reach = 0
+
+        # Penalize large changes in action (for smoother control)
+        if len(self.action_buffer) == self.ACTION_BUFFER_SIZE:
+            action_diff = np.diff(np.vstack(self.action_buffer), axis=0)
+            action_smoothness_penalty = -0.1 * np.sum(np.linalg.norm(action_diff, axis=1))
+        else: 
+            action_smoothness_penalty = 0
+
+        # Combine rewards
+        total_reward = dist + reach + action_smoothness_penalty
+
+        return total_reward
 
     ################################################################################
     
@@ -154,8 +186,10 @@ class Waypoints(BaseRLAviary):
             Whether the current episode is done.
 
         """
-        state = self._getDroneStateVector(0)
-        if np.linalg.norm(self.TARGET_POS-state[0:3]) < .0001:
+        state = self._getDroneStateVector(0)      
+
+        if self.wp_cnt == len(self.waypoints) - 3 and \
+            np.linalg.norm(self.waypoints[self.wp_cnt]- state[0:3]) < 0.1:
             return True
         else:
             return False
@@ -182,6 +216,18 @@ class Waypoints(BaseRLAviary):
             return False
 
     ################################################################################
+
+    def reset(self,
+              seed : int = None,
+              options : dict = None):
+        """Resets the environment.
+
+        """
+        self.wp_cnt = 0 # Reset wp_cnt upon every reset
+
+        return super().reset(seed=seed, options=options)
+    
+    #################################################################################
     
     def _computeInfo(self):
         """Computes the current info dict(s).
